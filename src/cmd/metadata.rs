@@ -32,8 +32,6 @@ use semver::Version;
 use std::{fs, path::PathBuf};
 use url::Url;
 
-const METADATA_FILE: &str = "metadata.json";
-
 /// Executes the metadata generation process
 struct GenerateMetadataCommand {
     crate_metadata: CrateMetadata,

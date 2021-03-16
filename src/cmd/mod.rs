@@ -15,13 +15,14 @@
 // along with cargo-contract.  If not, see <http://www.gnu.org/licenses/>.
 
 pub mod build;
-#[cfg(feature = "extrinsics")]
-mod deploy;
-#[cfg(feature = "extrinsics")]
-mod instantiate;
 pub mod metadata;
 pub mod new;
 
 pub(crate) use self::build::{BuildCommand, CheckCommand};
 #[cfg(feature = "extrinsics")]
-pub(crate) use self::{deploy::execute_deploy, instantiate::execute_instantiate};
+mod extrinsics;
+
+#[cfg(feature = "extrinsics")]
+pub(crate) use self::extrinsics::{
+    call::CallCommand, deploy::DeployCommand, instantiate::InstantiateCommand,
+};

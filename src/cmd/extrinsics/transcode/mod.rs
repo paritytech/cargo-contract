@@ -1,0 +1,309 @@
+// Copyright 2018-2020 Parity Technologies (UK) Ltd.
+// This file is part of cargo-contract.
+//
+// cargo-contract is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// cargo-contract is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with cargo-contract.  If not, see <http://www.gnu.org/licenses/>.
+
+mod decode;
+mod encode;
+mod env_types;
+mod scon;
+mod transcoder;
+
+use self::{
+    scon::{Map, Value},
+    transcoder::Transcoder,
+};
+
+use anyhow::Result;
+use ink_metadata::{ConstructorSpec, InkProject, MessageSpec};
+use scale::Input;
+use scale_info::{
+    form::{CompactForm, Form},
+    Field, TypeDefComposite,
+};
+use std::fmt::{self, Debug, Display, Formatter};
+
+/// Encode strings to SCALE encoded smart contract calls.
+/// Decode SCALE encoded smart contract events and return values into `Value` objects.
+pub struct ContractMessageTranscoder<'a> {
+    metadata: &'a InkProject,
+    transcoder: Transcoder<'a>,
+}
+
+impl<'a> ContractMessageTranscoder<'a> {
+    pub fn new(metadata: &'a InkProject) -> Self {
+        Self {
+            metadata,
+            transcoder: Transcoder::new(metadata.registry()),
+        }
+    }
+
+    pub fn encode<I, S>(&self, name: &str, args: I) -> Result<Vec<u8>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str> + Debug,
+    {
+        let (selector, spec_args) = match (
+            self.find_constructor_spec(name),
+            self.find_message_spec(name),
+        ) {
+            (Some(c), None) => (c.selector(), c.args()),
+            (None, Some(m)) => (m.selector(), m.args()),
+            (Some(_), Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "Invalid metadata: both a constructor and message found with name '{}'",
+                    name
+                ))
+            }
+            (None, None) => {
+                return Err(anyhow::anyhow!(
+                    "No constructor or message with the name '{}' found",
+                    name
+                ))
+            }
+        };
+
+        let mut encoded = selector.to_bytes().to_vec();
+        for (spec, arg) in spec_args.iter().zip(args) {
+            let value = arg.as_ref().parse::<scon::Value>()?;
+            self.transcoder.encode(spec.ty(), &value, &mut encoded)?;
+        }
+        Ok(encoded)
+    }
+
+    fn constructors(&self) -> impl Iterator<Item = &ConstructorSpec<CompactForm>> {
+        self.metadata.spec().constructors().iter()
+    }
+
+    fn messages(&self) -> impl Iterator<Item = &MessageSpec<CompactForm>> {
+        self.metadata.spec().messages().iter()
+    }
+
+    fn find_message_spec(&self, name: &str) -> Option<&MessageSpec<CompactForm>> {
+        self.messages()
+            .find(|msg| msg.name().contains(&name.to_string()))
+    }
+
+    fn find_constructor_spec(&self, name: &str) -> Option<&ConstructorSpec<CompactForm>> {
+        self.constructors()
+            .find(|msg| msg.name().contains(&name.to_string()))
+    }
+
+    pub fn decode_contract_event(&self, data: &mut &[u8]) -> Result<ContractEvent> {
+        let variant_index = data.read_byte()?;
+        let event_spec = self
+            .metadata
+            .spec()
+            .events()
+            .get(variant_index as usize)
+            .ok_or(anyhow::anyhow!(
+                "Event variant {} not found in contract metadata",
+                variant_index
+            ))?;
+
+        let mut args = Vec::new();
+        for arg in event_spec.args() {
+            let name = arg.name().to_string();
+            let value = self.transcoder.decode(arg.ty().ty().id(), data)?;
+            args.push((Value::String(name), value));
+        }
+
+        let name = event_spec.name().to_string();
+        let map = Map::new(Some(&name), args.into_iter().collect());
+
+        Ok(ContractEvent {
+            name,
+            value: Value::Map(map),
+        })
+    }
+
+    pub fn decode_return(&self, name: &str, data: Vec<u8>) -> Result<Value> {
+        let msg_spec = self.find_message_spec(name).ok_or(anyhow::anyhow!(
+            "Failed to find message spec with name '{}'",
+            name
+        ))?;
+        if let Some(return_ty) = msg_spec.return_type().opt_type() {
+            self.transcoder.decode(return_ty.ty().id(), &mut &data[..])
+        } else {
+            Ok(Value::Unit)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum CompositeTypeFields {
+    StructNamedFields(Vec<CompositeTypeNamedField>),
+    TupleStructUnnamedFields(Vec<Field<CompactForm>>),
+    NoFields,
+}
+
+#[derive(Debug)]
+pub struct CompositeTypeNamedField {
+    name: <CompactForm as Form>::String,
+    field: Field<CompactForm>,
+}
+
+impl CompositeTypeNamedField {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn field(&self) -> &Field<CompactForm> {
+        &self.field
+    }
+}
+
+impl CompositeTypeFields {
+    pub fn from_type_def(type_def: &TypeDefComposite<CompactForm>) -> Result<Self> {
+        if type_def.fields().is_empty() {
+            Ok(Self::NoFields)
+        } else if type_def.fields().iter().all(|f| f.name().is_some()) {
+            let fields = type_def
+                .fields()
+                .iter()
+                .map(|f| CompositeTypeNamedField {
+                    name: f.name().expect("All fields have a name; qed").to_owned(),
+                    field: f.clone(),
+                })
+                .collect();
+            Ok(Self::StructNamedFields(fields))
+        } else if type_def.fields().iter().all(|f| f.name().is_none()) {
+            Ok(Self::TupleStructUnnamedFields(type_def.fields().to_vec()))
+        } else {
+            Err(anyhow::anyhow!(
+                "Struct fields should either be all named or all unnamed"
+            ))
+        }
+    }
+}
+
+pub struct ContractEvent {
+    pub name: String,
+    pub value: Value,
+}
+
+impl Debug for ContractEvent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        <Self as Display>::fmt(&self, f)
+    }
+}
+
+impl Display for ContractEvent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        <Value as Display>::fmt(&self.value, f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scale::Encode;
+    use scon::Value;
+    use std::str::FromStr;
+
+    use ink_lang as ink;
+
+    #[ink::contract]
+    pub mod flipper {
+        #[ink(storage)]
+        pub struct Flipper {
+            value: bool,
+        }
+
+        impl Flipper {
+            /// Creates a new flipper smart contract initialized with the given value.
+            #[ink(constructor)]
+            pub fn new(init_value: bool) -> Self {
+                Self { value: init_value }
+            }
+
+            /// Creates a new flipper smart contract initialized to `false`.
+            #[ink(constructor)]
+            pub fn default() -> Self {
+                Self::new(Default::default())
+            }
+
+            /// Flips the current value of the Flipper's bool.
+            #[ink(message)]
+            pub fn flip(&mut self) {
+                self.value = !self.value;
+            }
+
+            /// Returns the current value of the Flipper's bool.
+            #[ink(message)]
+            pub fn get(&self) -> bool {
+                self.value
+            }
+
+            /// Dummy setter which receives the env type AccountId.
+            #[ink(message)]
+            pub fn set_account_id(&self, account_id: AccountId) {
+                let _ = account_id;
+            }
+        }
+    }
+
+    fn generate_metadata() -> ink_metadata::InkProject {
+        extern "Rust" {
+            fn __ink_generate_metadata() -> ink_metadata::InkProject;
+        }
+        unsafe { __ink_generate_metadata() }
+    }
+
+    #[test]
+    fn encode_single_primitive_arg() -> Result<()> {
+        let metadata = generate_metadata();
+        let transcoder = ContractMessageTranscoder::new(&metadata);
+
+        let encoded = transcoder.encode("new", &["true"])?;
+        // encoded args follow the 4 byte selector
+        let encoded_args = &encoded[4..];
+
+        assert_eq!(true.encode(), encoded_args);
+        Ok(())
+    }
+
+    #[test]
+    fn encode_account_id_custom_ss58_encoding() -> Result<()> {
+        let metadata = generate_metadata();
+        let transcoder = ContractMessageTranscoder::new(&metadata);
+
+        let encoded = transcoder.encode(
+            "set_account_id",
+            &["5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"],
+        )?;
+
+        // encoded args follow the 4 byte selector
+        let encoded_args = &encoded[4..];
+
+        let expected = sp_core::crypto::AccountId32::from_str(
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+        )
+        .unwrap();
+        assert_eq!(expected.encode(), encoded_args);
+        Ok(())
+    }
+
+    #[test]
+    fn decode_primitive_return() -> Result<()> {
+        let metadata = generate_metadata();
+        let transcoder = ContractMessageTranscoder::new(&metadata);
+
+        let encoded = true.encode();
+        let decoded = transcoder.decode_return("get", encoded)?;
+
+        assert_eq!(Value::Bool(true), decoded);
+        Ok(())
+    }
+}

@@ -92,6 +92,15 @@ pub(crate) fn base_name(path: &Path) -> &str {
         .expect("must be valid utf-8")
 }
 
+/// Decode hex string with or without 0x prefix
+pub fn decode_hex(input: &str) -> Result<Vec<u8>, hex::FromHexError> {
+    if input.starts_with("0x") {
+        hex::decode(input.trim_start_matches("0x"))
+    } else {
+        hex::decode(input)
+    }
+}
+
 /// Prints to stdout if `verbosity.is_verbose()` is `true`.
 #[macro_export]
 macro_rules! maybe_println {

@@ -16,6 +16,9 @@
 
 mod cmd;
 mod crate_metadata;
+#[cfg(test)]
+#[cfg(feature = "integration-tests")]
+mod tests;
 mod util;
 mod validate_wasm;
 mod workspace;
@@ -24,15 +27,21 @@ use self::workspace::ManifestPath;
 
 use crate::cmd::{BuildCommand, CheckCommand};
 
-#[cfg(feature = "extrinsics")]
-use sp_core::{crypto::Pair, sr25519, H256};
-use std::{convert::TryFrom, path::PathBuf};
-#[cfg(feature = "extrinsics")]
-use subxt::PairSigner;
+use std::{
+    convert::{TryFrom, TryInto},
+    path::PathBuf,
+};
 
 use anyhow::{Error, Result};
 use colored::Colorize;
 use structopt::{clap, StructOpt};
+
+#[cfg(feature = "extrinsics")]
+use crate::cmd::{CallCommand, DeployCommand, InstantiateCommand};
+#[cfg(feature = "extrinsics")]
+use sp_core::{crypto::Pair, sr25519};
+#[cfg(feature = "extrinsics")]
+use subxt::PairSigner;
 
 #[derive(Debug, StructOpt)]
 #[structopt(bin_name = "cargo")]
@@ -65,7 +74,7 @@ impl std::str::FromStr for HexData {
 
 /// Arguments required for creating and sending an extrinsic to a substrate node
 #[cfg(feature = "extrinsics")]
-#[derive(Debug, StructOpt)]
+#[derive(Clone, Debug, StructOpt)]
 pub(crate) struct ExtrinsicOpts {
     /// Websockets url of a substrate node
     #[structopt(
@@ -81,19 +90,26 @@ pub(crate) struct ExtrinsicOpts {
     /// Password for the secret key
     #[structopt(name = "password", long, short)]
     password: Option<String>,
+    #[structopt(flatten)]
+    verbosity: VerbosityFlags,
 }
 
 #[cfg(feature = "extrinsics")]
 impl ExtrinsicOpts {
-    pub fn signer(&self) -> Result<PairSigner<subxt::DefaultNodeRuntime, sr25519::Pair>> {
+    pub fn signer(&self) -> Result<PairSigner<subxt::ContractsTemplateRuntime, sr25519::Pair>> {
         let pair =
             sr25519::Pair::from_string(&self.suri, self.password.as_ref().map(String::as_ref))
                 .map_err(|_| anyhow::anyhow!("Secret string error"))?;
         Ok(PairSigner::new(pair))
     }
+
+    /// Returns the verbosity
+    pub fn verbosity(&self) -> Result<Verbosity> {
+        TryFrom::try_from(&self.verbosity)
+    }
 }
 
-#[derive(Clone, Debug, StructOpt)]
+#[derive(Clone, Copy, Debug, StructOpt)]
 pub struct VerbosityFlags {
     /// No output printed to stdout
     #[structopt(long)]
@@ -324,43 +340,12 @@ enum Command {
     /// Upload the smart contract code to the chain
     #[cfg(feature = "extrinsics")]
     #[structopt(name = "deploy")]
-    Deploy {
-        #[structopt(flatten)]
-        extrinsic_opts: ExtrinsicOpts,
-        /// Path to wasm contract code, defaults to `./target/ink/<name>.wasm`
-        #[structopt(parse(from_os_str))]
-        wasm_path: Option<PathBuf>,
-    },
+    Deploy(DeployCommand),
     /// Instantiate a deployed smart contract
     #[cfg(feature = "extrinsics")]
-    #[structopt(name = "instantiate")]
-    Instantiate {
-        #[structopt(flatten)]
-        extrinsic_opts: ExtrinsicOpts,
-        /// Transfers an initial balance to the instantiated contract
-        #[structopt(name = "endowment", long, default_value = "0")]
-        endowment: u128,
-        /// Maximum amount of gas to be used for this command
-        #[structopt(name = "gas", long, default_value = "500000000")]
-        gas_limit: u64,
-        /// The hash of the smart contract code already uploaded to the chain
-        #[structopt(long, parse(try_from_str = parse_code_hash))]
-        code_hash: H256,
-        /// Hex encoded data to call a contract constructor
-        #[structopt(long)]
-        data: HexData,
-    },
-}
-
-#[cfg(feature = "extrinsics")]
-fn parse_code_hash(input: &str) -> Result<H256> {
-    let bytes = hex::decode(input)?;
-    if bytes.len() != 32 {
-        anyhow::bail!("Code hash should be 32 bytes in length")
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(H256(arr))
+    Instantiate(InstantiateCommand),
+    #[cfg(feature = "extrinsics")]
+    Call(CallCommand),
 }
 
 fn main() {
@@ -414,29 +399,16 @@ fn exec(cmd: Command) -> Result<Option<String>> {
         )),
         Command::Test {} => Err(anyhow::anyhow!("Command unimplemented")),
         #[cfg(feature = "extrinsics")]
-        Command::Deploy {
-            extrinsic_opts,
-            wasm_path,
-        } => {
-            let code_hash = cmd::execute_deploy(extrinsic_opts, wasm_path.as_ref())?;
-            Ok(Some(format!("Code hash: {:?}", code_hash)))
+        Command::Deploy(deploy) => {
+            let code_hash = deploy.exec()?;
+            Ok(format!("Code hash: {:#x}", code_hash))
         }
         #[cfg(feature = "extrinsics")]
-        Command::Instantiate {
-            extrinsic_opts,
-            endowment,
-            code_hash,
-            gas_limit,
-            data,
-        } => {
-            let contract_account = cmd::execute_instantiate(
-                extrinsic_opts,
-                *endowment,
-                *gas_limit,
-                *code_hash,
-                data.clone(),
-            )?;
-            Ok(Some(format!("Contract account: {:?}", contract_account)))
+        Command::Instantiate(instantiate) => {
+            let contract_account = instantiate.run()?;
+            Ok(format!("Contract account: {}", contract_account))
         }
+        #[cfg(feature = "extrinsics")]
+        Command::Call(call) => call.run(),
     }
 }
