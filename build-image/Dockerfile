@@ -19,6 +19,8 @@ ARG WGET_VERSION=1.21-1+deb11u1
 # g++ package version
 ARG G_VERSION=4:10.2.1-1
 ARG MUSL_V=1.2.2-1
+# The rust version used by linter
+ARG RUST_LINTER_VERSION=nightly-2023-12-28
 
 # metadata
 LABEL io.parity.image.vendor="Parity Technologies" \
@@ -37,7 +39,8 @@ LABEL io.parity.image.vendor="Parity Technologies" \
     io.parity.version.gcc=${GCC_VERSION} \
     io.parity.version.wget=${WGET_VERSION} \
     io.parity.version.g_plus_plus=${G_VERSION} \
-    io.parity.version.musl=${MUSL_V}
+    io.parity.version.musl=${MUSL_V} \
+    io.parity.version.rust_linter=${RUST_LINTER_VERSION}
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -51,6 +54,9 @@ RUN set -eux \
     && chmod +x rustup-init \
     && ./rustup-init -y --no-modify-path --profile minimal --component rust-src rustfmt clippy --default-toolchain $RUST_VERSION  \
     && rm rustup-init \
+    # Install nightly toolchain required by `cargo contract build --verifiable --lint` command
+    && rustup install ${RUST_LINTER_VERSION} --profile minimal \
+    && rustup component add rust-src --toolchain ${RUST_LINTER_VERSION} \
     && chmod -R a+w $RUSTUP_HOME $CARGO_HOME \
     && rustup --version \
     && cargo --version \
@@ -68,12 +74,14 @@ ARG CARGO_CONTRACT_BRANCH
 ARG CARGO_CONTRACT_TAG
 ARG CARGO_CONTRACT_REV
 ARG CARGO_CONTRACT_GIT
+ARG RUST_LINTER_VERSION
 
 # This is important, see https://github.com/rust-lang/docker-rust/issues/85
 ENV RUSTFLAGS="-C target-feature=-crt-static"
 
 # Install required packages for `cargo-contract`
-RUN apt-get -y update && apt-get -y install gcc=${GCC_VERSION} g++=${G_VERSION} musl-dev=${MUSL_V} \
+# libssl-dev and pkg-config is required by cargo-dylint
+RUN apt-get -y update && apt-get -y install gcc=${GCC_VERSION} g++=${G_VERSION} musl-dev=${MUSL_V} libssl-dev pkg-config \
     # Install cargo contract from git if the arg is set
     && if [ -n "$CARGO_CONTRACT_GIT" ]; then \
     COMMAND="cargo install --git ${CARGO_CONTRACT_GIT}" ; \
@@ -91,10 +99,12 @@ RUN apt-get -y update && apt-get -y install gcc=${GCC_VERSION} g++=${G_VERSION} 
     fi \
     && echo "Executing ${COMMAND}" \
     && eval "${COMMAND}" \
+    # Install cargo-dylint, dylint-link required by `cargo contract build --verifiable --lint` command
+    && cargo +${RUST_LINTER_VERSION} install cargo-dylint dylint-link \
     # Cleanup after `cargo install`
     && rm -rf ${CARGO_HOME}/"registry" ${CARGO_HOME}/"git" /root/.cache/sccache \
     # apt clean up
-    && apt-get remove -y gnupg \
+    && apt-get remove -y gnupg libssl-dev pkg-config \
     && apt-get autoremove -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -102,6 +112,8 @@ RUN apt-get -y update && apt-get -y install gcc=${GCC_VERSION} g++=${G_VERSION} 
 FROM slimmed-rust as ink-dev
 
 COPY --from=cc-builder /usr/local/cargo/bin/cargo-contract /usr/local/bin/cargo-contract
+COPY --from=cc-builder /usr/local/cargo/bin/cargo-dylint /usr/local/cargo/bin/cargo-dylint
+COPY --from=cc-builder /usr/local/cargo/bin/dylint-link /usr/local/cargo/bin/dylint-link
 
 WORKDIR /contract
 
