@@ -46,8 +46,8 @@ use sp_core::{
 };
 use std::{
     collections::BTreeMap,
-    fmt,
     fmt::{
+        self,
         Display,
         Formatter,
     },
@@ -97,6 +97,20 @@ where
             rpc,
             _phantom: Default::default(),
         }
+    }
+
+    /// Fetch the storage version of the pallet contracts (pallet version)
+    pub async fn version(&self) -> Result<u16> {
+        self.rpc
+            .client
+            .storage()
+            .at_latest()
+            .await?
+            .storage_version("Contracts")
+            .await
+            .map_err(|e| {
+                anyhow!("The storage version for the contracts pallet could not be determined: {e}")
+            })
     }
 
     /// Load the raw key/value storage for a given contract.
