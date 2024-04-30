@@ -38,10 +38,19 @@ serde_json = "1.0.116"
 thiserror = "1.0.59"
 strsim = "0.11.1"
 
+# AccountId20 dependencies
+impl-serde = { version = "0.4.0" }
+libsecp256k1 = { version = "0.7.1", features = [ "hmac" ] }
+sha3 = { version = "0.10.3", default-features = false }
+sp-core = "31.0.0"
+sp-io = "33.0.0"
+sp-runtime = "34.0.0"
+log = "0.4.20"
+subxt = "0.35.3"
+
 [dev-dependencies]
 assert_matches = "1.5.0"
 ink = "5.0.0"
-sp-core = "31.0.0"
 sp-keyring = "34.0.0"
 
 [features]
